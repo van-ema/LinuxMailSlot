@@ -94,7 +94,7 @@ int init_module(void)
 	Major = register_chrdev(0, DEVICE_NAME, &fops);
 
 	if (Major < 0) {
-	  printk("Registering hit device failed\n");
+	  printk("Registering Mailslot device failed\n");
 	  return Major;
 	}
 

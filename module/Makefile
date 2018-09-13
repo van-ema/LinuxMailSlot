@@ -1,7 +1,14 @@
 obj-m += mailSlot.o
+MODULE += mailSlot.ko
 
 all:
 	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules 
+
+load:
+	sudo insmod ./$(MODULE)
+
+unload:
+	sudo rmmod -f ./$(MODULE)
 
 clean:
 	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean

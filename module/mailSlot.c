@@ -52,16 +52,25 @@ static int mailslot_release(struct inode *, struct file *);
 
 #define DEBUG if(1)
 #define DEVICE_NAME "MailSlot"
-#define MSG_SZ 256
-#define MAILSLOT_SZ (MSG_SZ * 1000)
+#define MAX_MSG_SZ 256
+#define MAX_MS_SZ (MAX_MSG_SZ * 1000)
 #define N_MAX_INSTANCES 256
-#define N_START_INSTANCES	256
+#define N_START_INSTANCES 256
+
+/*
+ * Policy
+ */
 #define BLOCKING 0
 #define NO_BLOCKING 1
 
+/*
+ * ioctl commands
+ */
+#define CMD_BLOCK 0
+#define CMD_MS_SZ 1
+#define CMD_MSG_SZ 2
+
 static int Major;
-static unsigned int max_msg_size = MSG_SZ;
-static short policy = BLOCKING;
 int errno;
 
 typedef struct mailslot_msg_t {
@@ -77,6 +86,13 @@ typedef struct mailslot_t {
 	struct mutex mtx;
 	wait_queue_head_t reader_queue;
 	wait_queue_head_t writer_queue;
+
+	unsigned int max_msg_size;
+	unsigned int max_ms_size;
+
+	short policy;
+
+	atomic_t count;
 } mailslot_t;
 
 static mailslot_t mailslot[N_START_INSTANCES];
@@ -103,7 +119,7 @@ mailslot_msg_t *new_msg(char *data, int len)
 
 int full(int minor, int len)
 {
-	return mailslot[minor].size + len > MAILSLOT_SZ;
+	return mailslot[minor].size + len > mailslot[minor].max_ms_size;
 }
 
 int empty(int minor)
@@ -117,11 +133,16 @@ static ssize_t push(int minor, mailslot_msg_t * msg)
 
 	mutex_lock(&ms->mtx);
 
+	if (msg->size > ms->max_msg_size) {
+		printk(KERN_ERR "%s: messagge too long\n", MODNAME);
+		return -EMSGSIZE;
+	}
+
 	while (full(minor, msg->size)) {
 
 		mutex_unlock(&ms->mtx);
 
-		if (policy == NO_BLOCKING) {
+		if (ms->policy == NO_BLOCKING) {
 			printk(KERN_INFO
 			       "%s: message cannot be accepted because it "
 			       "exceed available memory\n", MODNAME);
@@ -163,7 +184,7 @@ static mailslot_msg_t *pull(int minor, size_t len)
 
 	while (empty(minor) || ms->first->size > len) {
 		mutex_unlock(&mailslot[minor].mtx);
-		if (policy == NO_BLOCKING) {
+		if (ms->policy == NO_BLOCKING) {
 			return NULL;
 		} else {
 			wait_event_interruptible(ms->reader_queue,
@@ -193,11 +214,6 @@ static ssize_t mailslot_write(struct file *filp, const char *buff, size_t len,
 	int size;
 	mailslot_msg_t *msg;
 	char kbuf[len];
-
-	if (len > max_msg_size) {
-		printk(KERN_ERR "%s: messagge too long\n", MODNAME);
-		return -EMSGSIZE;
-	}
 
 	if (copy_from_user(kbuf, buff, len)) {
 		printk(KERN_ERR "%s: memory coping from user error.", MODNAME);
@@ -258,6 +274,22 @@ static ssize_t mailslot_read(struct file *filp, char __user * buff, size_t len,
 static long mailslot_ioctl(struct file *filp, unsigned int cmd,
 			   unsigned long arg)
 {
+	int minor = MINOR(filp->f_path.dentry->d_inode->i_rdev);
+	mailslot_t *ms = mailslot + minor;
+
+	switch(cmd){
+		case CMD_BLOCK:
+		ms->policy = arg == NO_BLOCKING ? NO_BLOCKING : BLOCKING;
+		break;
+
+		case CMD_MSG_SZ:
+		ms->max_msg_size = arg > MAX_MSG_SZ ? MAX_MSG_SZ : arg;
+		break;
+
+		case CMD_MS_SZ:
+		ms->max_ms_size = arg > MAX_MS_SZ ? MAX_MS_SZ : arg;
+		break;
+	}
 	return 0;
 }
 
@@ -306,6 +338,11 @@ int init_module(void)
 		mailslot[i].size = 0;
 		mailslot[i].first = NULL;
 		mailslot[i].last = NULL;
+		mailslot[i].max_ms_size = MAX_MS_SZ;
+		mailslot[i].max_msg_size = MAX_MSG_SZ;
+		mailslot[i].policy = BLOCKING;
+
+		atomic_set(&mailslot[i].count, 0);
 	}
 
 	printk(KERN_INFO "%s: initialization terminated\n", MODNAME);

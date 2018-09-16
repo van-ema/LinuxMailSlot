@@ -54,10 +54,14 @@ static int mailslot_release(struct inode *, struct file *);
 #define DEVICE_NAME "MailSlot"
 #define MSG_SZ 256
 #define MAILSLOT_SZ (MSG_SZ * 1000)
-#define N_INSTANCES 256
+#define N_MAX_INSTANCES 256
+#define N_START_INSTANCES	256
+#define BLOCKING 0
+#define NO_BLOCKING 1
 
 static int Major;
 static unsigned int max_msg_size = MSG_SZ;
+static short policy = BLOCKING;
 int errno;
 
 typedef struct mailslot_msg_t {
@@ -75,7 +79,7 @@ typedef struct mailslot_t {
 	wait_queue_head_t writer_queue;
 } mailslot_t;
 
-static mailslot_t mailslot[N_INSTANCES];
+static mailslot_t mailslot[N_START_INSTANCES];
 
 mailslot_msg_t *new_msg(char *data, int len)
 {
@@ -97,58 +101,89 @@ mailslot_msg_t *new_msg(char *data, int len)
 	return msg;
 }
 
+int full(int minor, int len)
+{
+	return mailslot[minor].size + len > MAILSLOT_SZ;
+}
+
+int empty(int minor)
+{
+	return mailslot[minor].size == 0;
+}
+
 static ssize_t push(int minor, mailslot_msg_t * msg)
 {
-	mutex_lock(&mailslot[minor].mtx);
+	mailslot_t *ms = mailslot + minor;
 
-	if (mailslot[minor].size + msg->size > MAILSLOT_SZ) {
-		printk(KERN_INFO "%s: message cannot be accepted because it "
-		       "exceed available memory\n", MODNAME);
-		kfree(msg);
-		return -ERANGE;
+	mutex_lock(&ms->mtx);
+
+	while (full(minor, msg->size)) {
+
+		mutex_unlock(&ms->mtx);
+
+		if (policy == NO_BLOCKING) {
+			printk(KERN_INFO
+			       "%s: message cannot be accepted because it "
+			       "exceed available memory\n", MODNAME);
+			kfree(msg);
+			return -ERANGE;
+		} else {
+			wait_event_interruptible(ms->writer_queue,
+						 !full(minor, msg->size));
+			mutex_lock(&ms->mtx);
+		}
 	}
 
-	if (mailslot[minor].last == NULL) {
-		mailslot[minor].first = msg;
-		mailslot[minor].last = msg;
-		goto exit;
+	if (ms->last == NULL) {
+		ms->first = msg;
+		ms->last = msg;
+	} else {
+		ms->last->next = msg;
+		ms->last = msg;
 	}
 
-	mailslot[minor].last->next = msg;
-	mailslot[minor].last = msg;
-
- exit:
-	mailslot[minor].size += msg->size;
+	ms->size += msg->size;
 
 	DEBUG
 	    printk(KERN_DEBUG "%s: minor:%d size %ld\n", MODNAME, minor,
 		   mailslot[minor].size);
 
-	mutex_unlock(&mailslot[minor].mtx);
+	mutex_unlock(&ms->mtx);
 
+	wake_up_interruptible(&ms->reader_queue);
 	return msg->size;
 }
 
 static mailslot_msg_t *pull(int minor, size_t len)
 {
 	mailslot_msg_t *msg;
+	mailslot_t *ms = mailslot + minor;
 
-	mutex_lock(&mailslot[minor].mtx);
+	mutex_lock(&ms->mtx);
 
-	if (mailslot[minor].first == NULL || mailslot[minor].first->size > len) {
+	while (empty(minor) || ms->first->size > len) {
 		mutex_unlock(&mailslot[minor].mtx);
-		return NULL;
+		if (policy == NO_BLOCKING) {
+			return NULL;
+		} else {
+			wait_event_interruptible(ms->reader_queue,
+						 !(empty(minor)
+						   || ms->first->size > len));
+			mutex_lock(&mailslot[minor].mtx);
+		}
 	}
 
-	msg = mailslot[minor].first;
-	mailslot[minor].first = mailslot[minor].first->next;
-	mailslot[minor].size -= msg->size;
+	msg = ms->first;
+	ms->first = ms->first->next;
+	ms->size -= msg->size;
 
 	DEBUG
 	    printk(KERN_DEBUG "%s: minor:%d size %ld\n", MODNAME, minor,
 		   mailslot[minor].size);
 
-	mutex_unlock(&mailslot[minor].mtx);
+	mutex_unlock(&ms->mtx);
+
+	wake_up_interruptible(&ms->reader_queue);
 	return msg;
 }
 
@@ -228,6 +263,13 @@ static long mailslot_ioctl(struct file *filp, unsigned int cmd,
 
 static int mailslot_open(struct inode *inode, struct file *file)
 {
+	int minor = MINOR(file->f_path.dentry->d_inode->i_rdev);
+	if (minor < 0 || minor > 255) {
+		printk(KERN_ERR "%s: Opening file with bad minor number\n",
+		       MODNAME);
+		return 1;
+	}
+
 	return 0;
 }
 
@@ -257,7 +299,7 @@ int init_module(void)
 	printk(KERN_INFO "Mailslot device registered,"
 	       " it is assigned major number %d\n", Major);
 
-	for (i = 0; i < N_INSTANCES; i++) {
+	for (i = 0; i < N_START_INSTANCES; i++) {
 		mutex_init(&mailslot[i].mtx);
 		init_waitqueue_head(&mailslot[i].reader_queue);
 		init_waitqueue_head(&mailslot[i].writer_queue);

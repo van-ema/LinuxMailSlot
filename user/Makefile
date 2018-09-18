@@ -5,7 +5,7 @@ OBJ=user.o
 %.o:%.c
 	$(CC) -c -o $@ $< $(FLAGS)
 
-user: $(OBJ)
+user.bin: $(OBJ)
 	$(CC) -o $@ $^ $(FLAGS)
 
 clean:

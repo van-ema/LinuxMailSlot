@@ -36,6 +36,7 @@
 #include <linux/wait.h>
 #include <linux/mutex.h>
 #include <asm/atomic.h>
+#include "mailslot.h"
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Emanuele Vannacci");
@@ -63,13 +64,6 @@ static int mailslot_release(struct inode *, struct file *);
 #define BLOCKING 0
 #define NO_BLOCKING 1
 
-/*
- * ioctl commands
- */
-#define CMD_BLOCK 0
-#define CMD_MS_SZ 1
-#define CMD_MSG_SZ 2
-
 static int Major;
 int errno;
 
@@ -90,10 +84,12 @@ typedef struct mailslot_t {
 	unsigned int max_msg_size;
 	unsigned int max_ms_size;
 
-	short policy;
-
 	atomic_t count;
 } mailslot_t;
+
+typedef struct metadata_t {
+	short policy;
+} metadata;
 
 static mailslot_t mailslot[N_START_INSTANCES];
 
@@ -119,7 +115,7 @@ mailslot_msg_t *new_msg(char *data, int len)
 
 int full(int minor, int len)
 {
-	return mailslot[minor].size + len > mailslot[minor].max_ms_size;
+	return mailslot[minor].size + len >= mailslot[minor].max_ms_size;
 }
 
 int empty(int minor)
@@ -127,7 +123,7 @@ int empty(int minor)
 	return mailslot[minor].size == 0;
 }
 
-static ssize_t push(int minor, mailslot_msg_t * msg)
+static ssize_t push(int minor, mailslot_msg_t * msg, short policy)
 {
 	mailslot_t *ms = mailslot + minor;
 
@@ -135,6 +131,7 @@ static ssize_t push(int minor, mailslot_msg_t * msg)
 
 	if (msg->size > ms->max_msg_size) {
 		printk(KERN_ERR "%s: messagge too long\n", MODNAME);
+		mutex_unlock(&ms->mtx);
 		return -EMSGSIZE;
 	}
 
@@ -142,7 +139,7 @@ static ssize_t push(int minor, mailslot_msg_t * msg)
 
 		mutex_unlock(&ms->mtx);
 
-		if (ms->policy == NO_BLOCKING) {
+		if (policy == NO_BLOCKING) {
 			printk(KERN_INFO
 			       "%s: message cannot be accepted because it "
 			       "exceed available memory\n", MODNAME);
@@ -155,7 +152,7 @@ static ssize_t push(int minor, mailslot_msg_t * msg)
 		}
 	}
 
-	if (ms->last == NULL) {
+	if (empty(minor)) {
 		ms->first = msg;
 		ms->last = msg;
 	} else {
@@ -165,17 +162,13 @@ static ssize_t push(int minor, mailslot_msg_t * msg)
 
 	ms->size += msg->size;
 
-	DEBUG
-	    printk(KERN_DEBUG "%s: minor:%d size %ld\n", MODNAME, minor,
-		   mailslot[minor].size);
-
 	mutex_unlock(&ms->mtx);
 
 	wake_up_interruptible(&ms->reader_queue);
 	return msg->size;
 }
 
-static mailslot_msg_t *pull(int minor, size_t len)
+static mailslot_msg_t *pull(int minor, size_t len, short policy)
 {
 	mailslot_msg_t *msg;
 	mailslot_t *ms = mailslot + minor;
@@ -184,7 +177,7 @@ static mailslot_msg_t *pull(int minor, size_t len)
 
 	while (empty(minor) || ms->first->size > len) {
 		mutex_unlock(&mailslot[minor].mtx);
-		if (ms->policy == NO_BLOCKING) {
+		if (policy == NO_BLOCKING) {
 			return NULL;
 		} else {
 			wait_event_interruptible(ms->reader_queue,
@@ -198,10 +191,6 @@ static mailslot_msg_t *pull(int minor, size_t len)
 	ms->first = ms->first->next;
 	ms->size -= msg->size;
 
-	DEBUG
-	    printk(KERN_DEBUG "%s: minor:%d size %ld\n", MODNAME, minor,
-		   mailslot[minor].size);
-
 	mutex_unlock(&ms->mtx);
 
 	wake_up_interruptible(&ms->reader_queue);
@@ -211,9 +200,11 @@ static mailslot_msg_t *pull(int minor, size_t len)
 static ssize_t mailslot_write(struct file *filp, const char *buff, size_t len,
 			      loff_t * off)
 {
-	int size;
+	int size, minor;
+	short p;
 	mailslot_msg_t *msg;
 	char kbuf[len];
+	metadata *data;
 
 	if (copy_from_user(kbuf, buff, len)) {
 		printk(KERN_ERR "%s: memory coping from user error.", MODNAME);
@@ -229,7 +220,14 @@ static ssize_t mailslot_write(struct file *filp, const char *buff, size_t len,
 		return -errno;
 	}
 
-	size = push(MINOR(filp->f_path.dentry->d_inode->i_rdev), msg);
+	data = (metadata *) filp->private_data;
+	p = data->policy;
+
+	minor = MINOR(filp->f_path.dentry->d_inode->i_rdev);
+	DEBUG
+		printk(KERN_DEBUG "%s: writing minor:%d, policy:%d (0 for BLOCKING)\n", MODNAME, minor, p);
+
+	size = push(minor, msg, p);
 
 	DEBUG
 	    printk(KERN_DEBUG "%s: written: %.*s\n", MODNAME, (int)msg->size,
@@ -241,13 +239,20 @@ static ssize_t mailslot_write(struct file *filp, const char *buff, size_t len,
 static ssize_t mailslot_read(struct file *filp, char __user * buff, size_t len,
 			     loff_t * off)
 {
-	int ret;
-	int minor;
+	int ret, minor;
+	short p;
 	mailslot_msg_t *msg;
+	metadata *data;
 
 	minor = MINOR(filp->f_path.dentry->d_inode->i_rdev);
 
-	msg = pull(minor, len);
+	data = (metadata *) filp->private_data;
+	p = data->policy;
+
+	DEBUG
+		printk(KERN_DEBUG "%s: reading minor:%d, policy:%d (0 for BLOCKING)\n", MODNAME, minor, p);
+
+	msg = pull(minor, len, p);
 	if (msg == NULL) {
 		printk(KERN_ERR "%s: no message to read\n", MODNAME);
 		return 0;
@@ -274,39 +279,81 @@ static ssize_t mailslot_read(struct file *filp, char __user * buff, size_t len,
 static long mailslot_ioctl(struct file *filp, unsigned int cmd,
 			   unsigned long arg)
 {
+	metadata *data;
 	int minor = MINOR(filp->f_path.dentry->d_inode->i_rdev);
 	mailslot_t *ms = mailslot + minor;
 
+	if(_IOC_TYPE(cmd) != MAILSLOT_IOC_MAGIC) return -ENOTTY;
+	if(_IOC_NR(cmd) > MS_IOC_MAXR) return  -ENOTTY;
+
+/*
+  	if(_IOC_DIR(cmd) & _IOC_READ)
+		err = !access_ok(VERIFY_WRITE, (void _ _user *) arg, _IOC_SIZE(cmd));
+	else if (_IOC_DIR(cmd) & _IOC_WRITE)
+		err = !access_ok(VERIFY_READ, (void _ _user *) arg, _IOC_SIZE(cmd));
+	if (err) return -EFAULT;
+*/
+
 	switch(cmd){
-		case CMD_BLOCK:
-		ms->policy = arg == NO_BLOCKING ? NO_BLOCKING : BLOCKING;
+		case MS_IOCSPOLICY:
+		data = (metadata *) filp->private_data;
+		data->policy = arg == NO_BLOCKING ? NO_BLOCKING : BLOCKING;
 		break;
 
-		case CMD_MSG_SZ:
+		case MS_IOCQPOLICY:
+		data = filp->private_data;
+		return data->policy;
+
+		case MS_IOCSMSGSZ:
 		ms->max_msg_size = arg > MAX_MSG_SZ ? MAX_MSG_SZ : arg;
 		break;
 
-		case CMD_MS_SZ:
-		ms->max_ms_size = arg > MAX_MS_SZ ? MAX_MS_SZ : arg;
+		case MS_IOCGMSGSZ:
+		return ms->max_msg_size;
+
+		case MS_IOCSSZ:
+		ms-> max_ms_size = arg > MAX_MS_SZ ? MAX_MS_SZ : arg;
 		break;
+
+		case MS_IOCGSZ:
+		return ms->max_ms_size;
 	}
+
 	return 0;
 }
 
 static int mailslot_open(struct inode *inode, struct file *file)
 {
+	metadata *data;
 	int minor = MINOR(file->f_path.dentry->d_inode->i_rdev);
 	if (minor < 0 || minor > 255) {
 		printk(KERN_ERR "%s: Opening file with bad minor number\n",
 		       MODNAME);
-		return 1;
+		return -ENXIO;
 	}
 
+	file->private_data = kmalloc(sizeof(metadata), GFP_KERNEL);
+	if(file->private_data == NULL){
+		printk(KERN_ERR "%s: memory allocation failure\n", MODNAME);
+		return -ENOMEM;
+	}
+
+	data = (metadata *) file->private_data;
+	data-> policy = (file->f_flags & O_NONBLOCK) >> 11;
+
+	DEBUG
+		printk(KERN_DEBUG "%s: opening file with minor %d, policy %d", MODNAME, minor, data->policy);
+
+	atomic_inc(&mailslot[minor].count);
 	return 0;
 }
 
 static int mailslot_release(struct inode *inode, struct file *file)
 {
+
+	int minor = MINOR(file->f_path.dentry->d_inode->i_rdev);
+	kfree(file->private_data);
+	atomic_dec(&mailslot[minor].count);
 	return 0;
 }
 
@@ -340,7 +387,6 @@ int init_module(void)
 		mailslot[i].last = NULL;
 		mailslot[i].max_ms_size = MAX_MS_SZ;
 		mailslot[i].max_msg_size = MAX_MSG_SZ;
-		mailslot[i].policy = BLOCKING;
 
 		atomic_set(&mailslot[i].count, 0);
 	}

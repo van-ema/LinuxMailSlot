@@ -27,19 +27,31 @@
 #include <sys/sysmacros.h>
 
 #define MAX_LINE 1024
-#define THRESHOLD 0.5
+#define BLOCKING 0
+#define NO_BLOCKING 1
 
-int mailslot_open(char *path)
+int mailslot_open(char *path, int policy)
 {
-	int fd = open(path, O_RDWR);
+	int flags = policy == BLOCKING ? O_RDWR : O_RDWR | O_NONBLOCK;
+	int fd = open(path, flags);
 	if(fd == -1){
 		fprintf(stderr, "error opening file\n");
 		exit(EXIT_FAILURE);
 	}
 
+	fprintf(stdout, "file opened, policy:%d (0 for BLOCKING)\n", policy);
 	return fd;
 }
+int mailslot_close(int fd)
+{
+	int ret = close(fd);
+	if(ret !=0){
+		fprintf(stderr, "error closing file\n");
+		exit(EXIT_FAILURE);
+	}
 
+	return ret;
+}
 int mailslot_read(int fd, int size)
 {
 	int r;
@@ -125,7 +137,8 @@ int main(int argc, char **argv)
 	char *basepath = "/dev/";
 	char *name, *cmd;
 	char path[MAX_LINE];
-	int fd, ret, size;
+	int fd,size;
+	int block = 1;
 	unsigned int major;
 	unsigned int minor;
 
@@ -143,18 +156,23 @@ int main(int argc, char **argv)
 	if(strcmp(cmd, "create") == 0) {
 		major = parse(argv[3]);
 		minor = parse(argv[4]);
-		ret = mailslot_create(path, major, minor);
+		mailslot_create(path, major, minor);
+		exit(EXIT_SUCCESS);
 	} else if (strcmp(cmd, "read") == 0) {
 		size = parse(argv[3]);
-		fd = mailslot_open(path);
-		ret = mailslot_read(fd, size);
+		if(argc > 4) block = parse(argv[4]);
+		fd = mailslot_open(path, block);
+		mailslot_read(fd, size);
 	} else if(strcmp(cmd, "write") == 0) {
-		fd = mailslot_open(path);
-		ret = mailslot_write(fd, argv[3]);
+		if(argc > 4) block = parse(argv[4]);
+		fd = mailslot_open(path, block);
+		mailslot_write(fd, argv[3]);
 	} else {
 		fprintf(stdout, "Usage: <prog> <cmd> <filename> [args] \n");
 		exit(EXIT_SUCCESS);
 	}
+
+	close(fd);
 
 	exit(EXIT_SUCCESS);
 }

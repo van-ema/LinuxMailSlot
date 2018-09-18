@@ -29,7 +29,18 @@
 #define MAX_LINE 1024
 #define THRESHOLD 0.5
 
-void mailslot_read(int fd, int size)
+int mailslot_open(char *path)
+{
+	int fd = open(path, O_RDWR);
+	if(fd == -1){
+		fprintf(stderr, "error opening file\n");
+		exit(EXIT_FAILURE);
+	}
+
+	return fd;
+}
+
+int mailslot_read(int fd, int size)
 {
 	int r;
 	char *buf;
@@ -44,25 +55,28 @@ void mailslot_read(int fd, int size)
 	r = read(fd, buf, size);
 	if(r==-1 || errno != 0){
 		fprintf(stderr,"error %d\n", errno);
-		return;
+		exit(EXIT_FAILURE);
 	} else if(r==0){
 		fprintf(stderr, "no msg to read: maybe you passed a buffer too short\n");
-		return;
+		exit(EXIT_FAILURE);
 	}
 
 	printf("%s\n",buf);
+	return r;
 }
 
-void mailslot_write(int fd, char *data)
+int mailslot_write(int fd, char *data)
 {
 	int r;
 
 	errno = 0;
 	r = write(fd, data, strlen(data));
-	if(r == -1)
+	if(r == -1){
 		fprintf(stderr, "error %d\n", errno);
-
+		exit(EXIT_FAILURE);
+	}
 	printf("write succeed: %s len:%d\n", data, (int) strlen(data));
+	return r;
 }
 
 int doesFileExist(const char *filename)
@@ -72,79 +86,75 @@ int doesFileExist(const char *filename)
 	return result == 0;
 }
 
-int main(int argc, char **argv)
+int mailslot_create(char *path, int major, int minor)
 {
-	char *basepath = "/dev/";
-	char *name, *cmd;
-	char path[MAX_LINE];
-	int n, fd, len, size, ret;
-	unsigned int major;
-	unsigned int minor;
 	dev_t dev;
-	pid_t pid;
+	int ret;
 
-	if(argc < 6){
-		fprintf(stderr, "Usage: <prog> <name> <major> <minor> <read|write> <size|msg> \n");
+	if(doesFileExist(path)){
+		fprintf(stderr, "file already exist\n");
+		return -1;
+	}
+
+	dev = makedev(major, minor);
+	errno = 0;
+	ret = mknod(path, 666 | S_IFCHR,  dev);
+	if(ret == -1){
+		fprintf(stderr, "error creating device node at %s\n", path);
 		exit(EXIT_FAILURE);
 	}
 
-	name = argv[1];
+	return ret;
+}
+
+int parse(char *arg)
+{
+	int val;
 	errno = 0;
-	major = strtol(argv[2], NULL, 0);
+	val = strtol(arg, NULL, 0);
 	if(errno != 0){
 		fprintf(stderr, "2th argument must be a valid int\n");
 		exit(EXIT_FAILURE);
 	}
 
-	errno = 0;
-	minor = strtol(argv[2],NULL,0);
-	if(errno != 0){
-		fprintf(stderr, "3th argument must be a valid int\n");
+	return val;
+}
+
+int main(int argc, char **argv)
+{
+	char *basepath = "/dev/";
+	char *name, *cmd;
+	char path[MAX_LINE];
+	int fd, ret, size;
+	unsigned int major;
+	unsigned int minor;
+
+	if(argc < 4){
+		fprintf(stderr, "Usage: <prog> <cmd> <filename> [args] \n");
 		exit(EXIT_FAILURE);
 	}
 
-	errno = 0;
-	minor = strtol(argv[3],NULL,0);
-	if(errno != 0){
-		fprintf(stderr, "4th argument must be a valid int\n");
-		exit(EXIT_FAILURE);
-	}
 
-	cmd = argv[4];
+	cmd = argv[1];
+	name = argv[2];
 	strcpy(path, basepath);
 	strcat(path, name);
 
-	if(!doesFileExist(path)){
-		dev = makedev(major, minor);
-		errno = 0;
-		ret = mknod(path, 666 | S_IFCHR,  dev);
-		if(ret == -1){
-			fprintf(stderr, "error creating device node at %s\n", path);
-		exit(EXIT_FAILURE);
-		}
+	if(strcmp(cmd, "create") == 0) {
+		major = parse(argv[3]);
+		minor = parse(argv[4]);
+		ret = mailslot_create(path, major, minor);
+	} else if (strcmp(cmd, "read") == 0) {
+		size = parse(argv[3]);
+		fd = mailslot_open(path);
+		ret = mailslot_read(fd, size);
+	} else if(strcmp(cmd, "write") == 0) {
+		fd = mailslot_open(path);
+		ret = mailslot_write(fd, argv[3]);
+	} else {
+		fprintf(stdout, "Usage: <prog> <cmd> <filename> [args] \n");
+		exit(EXIT_SUCCESS);
 	}
-
-	fd = open(path, O_RDWR);
-	if(fd == -1){
-		fprintf(stderr, "device not exist\n");
-		exit(EXIT_FAILURE);
-	}
-
-	if(!strcmp(cmd, "read")){
-		errno = 0;
-		size = strtol(argv[5], NULL, 0);
-		if( errno != 0){
-			fprintf(stderr, "6th argument must be a valid int\n");
-			exit(EXIT_FAILURE);
-		}
-
-		mailslot_read(fd, size);
-
-	} else if(!strcmp(cmd, "write")){
-		mailslot_write(fd, argv[5]);
-	}
-
-	close(fd);
 
 	exit(EXIT_SUCCESS);
 }

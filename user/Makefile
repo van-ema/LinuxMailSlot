@@ -9,4 +9,4 @@ user.bin: $(OBJ)
 	$(CC) -o $@ $^ $(FLAGS)
 
 clean:
-	rm -f *.o *~
+	rm -f *.o *~ *.bin

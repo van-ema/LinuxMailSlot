@@ -1,5 +1,6 @@
-obj-m += mailslot.o
-MODULE += mailslot.ko
+obj-m += ms.o
+ms-objs := mailslot.o fifo_wait_queue.o
+MODULE += ms.ko
 
 all:
 	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules 

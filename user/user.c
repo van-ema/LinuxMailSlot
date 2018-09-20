@@ -52,6 +52,7 @@ int mailslot_close(int fd)
 
 	return ret;
 }
+
 int mailslot_read(int fd, int size)
 {
 	int r;

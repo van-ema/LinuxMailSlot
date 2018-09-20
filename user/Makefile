@@ -1,11 +1,13 @@
 CC=gcc
 CFLAGS=-Wall -Wextra -O2
-OBJ=user.o
 
 %.o:%.c
 	$(CC) -c -o $@ $< $(FLAGS)
 
-user.bin: $(OBJ)
+user.bin: user.o
+	$(CC) -o $@ $^ $(FLAGS)
+
+ioctl.bin: ioctl.o
 	$(CC) -o $@ $^ $(FLAGS)
 
 clean:

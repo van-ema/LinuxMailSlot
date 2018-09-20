@@ -145,12 +145,12 @@ int awake(wait_queue_fifo * queue)
 
 int init_waitqueue_fifo(wait_queue_fifo * queue)
 {
-	queue = kmalloc(sizeof(wait_queue_fifo), GFP_KERNEL);
+/*	queue = kmalloc(sizeof(wait_queue_fifo), GFP_KERNEL);
 	if (queue == NULL) {
 		printk(KERN_ERR "memory allocation error\n");
 		return -1;
 	}
-
+*/
 	spin_lock_init(&queue->queue_lock);
 
 	queue->head.task = NULL;
@@ -170,7 +170,8 @@ int init_waitqueue_fifo(wait_queue_fifo * queue)
 
 	queue->head.next = &queue->tail;
 	queue->tail.prev = &queue->head;
-
+	if(queue->tail.prev == NULL)
+		printk(KERN_DEBUG "errrrrrroooooooorrr!");
 	init_waitqueue_head(&queue->wq);
 	atomic_set(&queue->count, 0);
 

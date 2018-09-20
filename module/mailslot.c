@@ -49,8 +49,8 @@ static int ms_release(struct inode *, struct file *);
 
 #define DEBUG if(1)
 #define DEVICE_NAME "MailSlot"
-#define MAX_MSG_SZ 256
-#define MAX_MS_SZ (MAX_MSG_SZ * 1000)
+#define MAX_MSG_SZ 8
+#define MAX_MS_SZ (MAX_MSG_SZ * 5)
 #define N_MAX_INSTANCES 256
 #define N_START_INSTANCES 256
 
@@ -119,8 +119,7 @@ int empty(int minor)
 	return mailslot[minor].size == 0;
 }
 
-static ssize_t push(int minor, mailslot_msg_t * msg, const char *buff,
-		    short policy)
+static ssize_t push(int minor, mailslot_msg_t * msg, short policy)
 {
 	mailslot_t *ms = mailslot + minor;
 
@@ -130,12 +129,6 @@ static ssize_t push(int minor, mailslot_msg_t * msg, const char *buff,
 		printk(KERN_ERR "%s: messagge too long\n", MODNAME);
 		mutex_unlock(&ms->mtx);
 		return -EMSGSIZE;
-	}
-
-	if (copy_from_user(msg->data, buff, msg->size)) {
-		printk(KERN_ERR "%s: memory coping from user error.", MODNAME);
-		mutex_unlock(&ms->mtx);
-		return -ENOMEM;
 	}
 
 	while (full(minor, msg->size)) {
@@ -164,6 +157,7 @@ static ssize_t push(int minor, mailslot_msg_t * msg, const char *buff,
 	ms->size += msg->size;
 
 	mutex_unlock(&ms->mtx);
+	// the queue is not-empty: wake up a reader
 	awake(&ms->reader_queue);
 
 	return msg->size;
@@ -176,14 +170,27 @@ static mailslot_msg_t *pull(int minor, size_t len, short policy)
 
 	mutex_lock(&ms->mtx);
 
-	while (empty(minor) || ms->first->size > len) {
+	while (empty(minor)) {
+
 		mutex_unlock(&mailslot[minor].mtx);
 		if (policy == NO_BLOCKING) {
+			errno = EMSGSIZE;
 			return NULL;
 		} else {
 			go_to_sleep(&ms->reader_queue);
 			mutex_lock(&mailslot[minor].mtx);
 		}
+	}
+
+	if(ms->first->size > len) {
+		mutex_unlock(&ms->mtx);
+
+		// maybe the next reader can get the message
+		if(policy == BLOCKING)
+			awake(&ms->reader_queue);
+
+		errno = EMSGSIZE;
+		return NULL;
 	}
 
 	// dequeue message and update queue's head
@@ -192,8 +199,8 @@ static mailslot_msg_t *pull(int minor, size_t len, short policy)
 	ms->size -= msg->size;
 
 	mutex_unlock(&ms->mtx);
-	// the queue is non-empty: wake up readers
-	awake(&ms->reader_queue);
+	// the queue is not-full: wake up a writer
+	awake(&ms->writer_queue);
 	return msg;
 }
 
@@ -216,7 +223,12 @@ ms_write(struct file *filp, const char *buff, size_t len, loff_t * off)
 		return -errno;
 	}
 
-	size = push(minor, msg, buff, policy);
+	if (copy_from_user(msg->data, buff, len)) {
+		printk(KERN_ERR "%s: memory coping from user error.", MODNAME);
+		return -ENOMEM;
+	}
+
+	size = push(minor, msg, policy);
 	if (size < 0) {
 		kfree(msg);
 		return size;
@@ -376,7 +388,6 @@ int init_module(void)
 		mutex_init(&mailslot[i].mtx);
 		init_waitqueue_fifo(&mailslot[i].reader_queue);
 		init_waitqueue_fifo(&mailslot[i].writer_queue);
-
 		mailslot[i].first = NULL;
 		mailslot[i].last = NULL;
 		mailslot[i].max_ms_size = MAX_MS_SZ;

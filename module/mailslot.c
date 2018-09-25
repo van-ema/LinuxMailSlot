@@ -111,7 +111,7 @@ mailslot_msg_t *alloc_msg(int len)
 
 int full(int minor, int len)
 {
-	return mailslot[minor].size + len >= mailslot[minor].max_ms_size;
+	return mailslot[minor].size + len > mailslot[minor].max_ms_size;
 }
 
 int empty(int minor)
@@ -119,6 +119,22 @@ int empty(int minor)
 	return mailslot[minor].size == 0;
 }
 
+/*
+ * push() - It insert a message into a mailslot idenified by a minor number
+ * @minor: device file minor number
+ * @msg: message to insert in the mailslot
+ * @policy: 0 (Blocking) or 1 (Non-Blocking)
+ *
+ * Thread-safe push on the mailslot. If the maislot exceed its maximum size
+ * the function can block if the policy is "blocking". Otherwise it returns with
+ * error.
+ *
+ * Return: the size of the data contained in the pushed message if it succeed.
+ * If the maislot is full return error code.
+ *
+ * EMSGZIZE: The message's data exceed the maximum data lenght in byte.
+ * ERANGE: The message exceed the maximum mailslot size in byte.
+ */
 static ssize_t push(int minor, mailslot_msg_t * msg, short policy)
 {
 	mailslot_t *ms = mailslot + minor;
@@ -163,6 +179,16 @@ static ssize_t push(int minor, mailslot_msg_t * msg, short policy)
 	return msg->size;
 }
 
+/*
+ * pull() - It dequeues the first message from the mailslot
+ * @minor: minor number of the device file.
+ * @len: maximum lenght of the message's data to dequeue.
+ * @policy 0 (Blocking) or 1 (Non-Blocking)
+ *
+ * Return: the first message in the maislot if len is less or equals to the 
+ * data's size in the message. if the message is empty and the policy specifys to
+ * block then an error.
+ */
 static mailslot_msg_t *pull(int minor, size_t len, short policy)
 {
 	mailslot_msg_t *msg;

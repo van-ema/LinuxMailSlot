@@ -111,7 +111,7 @@ int mailslot_create(char *path, int major, int minor)
 
 	dev = makedev(major, minor);
 	errno = 0;
-	ret = mknod(path, 666 | S_IFCHR,  dev);
+	ret = mknod(path, 0666 | S_IFCHR,  dev);
 	if(ret == -1){
 		fprintf(stderr, "error creating device node at %s\n", path);
 		exit(EXIT_FAILURE);
